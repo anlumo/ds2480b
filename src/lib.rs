@@ -11,30 +11,15 @@ use tokio_timer::sleep;
 use std::future::Future;
 use std::time::Duration;
 
-enum DS2480BCommand {
-    Reset =                 0xC1,
-    Pullup =                0x3B,
-    DataMode =              0xE1,
-    CommandMode =           0xE3,
-    SearchAccelleratorOn =  0xB1,
-    SearchAccelleratorOff = 0xA1,
-    ConvertT =              0x44,
-    PullupArm =             0xEF,
-    PullupDisarm =          0xED,
-    PulseTerminate =        0xF1,
-    ReadScratchpad =        0xBE,
-    SkipROM =               0xCC,
-    MatchROM =              0x55,
-    SearchROM =             0xF0,
-}
+use bigwise::{Bw64, Bw128, Bigwise};
 
-pub enum DS2480BSearchMode {
-    ROM,
-    Alarm,
-}
+pub mod codes;
+pub mod search;
 
 pub struct DS2480B<P: SerialPort + AsyncReadExt + AsyncWriteExt> {
     port: P,
+    level: codes::Level,
+    mode: codes::Mode,
 }
 
 impl<P: SerialPort + AsyncReadExt + AsyncWriteExt> DS2480B<P> {
@@ -47,79 +32,135 @@ impl<P: SerialPort + AsyncReadExt + AsyncWriteExt> DS2480B<P> {
             stop_bits: tokio_serial::StopBits::One,
             timeout: Duration::from_millis(100),
         })?;
-        Ok(DS2480B { port })
+        Ok(DS2480B {
+            port,
+            level: codes::Level::Normal,
+            mode: codes::Mode::Command,
+        })
     }
 
-    async fn send_break(&mut self) -> Result<()> {
-        if let Err(err) = self.port.set_baud_rate(2400) {
-            Err(err)
-        } else {
-            await!(self.port.write_all_async(&[0u8]))?;
-            self.port.set_baud_rate(9600)?;
-            Ok(())
+    async fn delay(&self) {
+        await!(tokio_timer::sleep(Duration::from_millis(2))).unwrap();
+    }
+    async fn flush<'a>(&'a mut self) -> std::io::Result<()> {
+        await!(self.port.flush_async())
+    }
+
+    async fn write<'a>(&'a mut self, buffer: &'a [u8]) -> std::io::Result<()> {
+        await!(self.flush())?;
+        await!(self.port.write_all_async(buffer))
+    }
+
+    /// Reset all of the devices on the 1-Wire Net and return the result.
+    ///
+    /// Returns: true:  presense pulse(s) detected, device(s) reset
+    ///          false: no presense pulses detected
+    async fn reset(&mut self) -> Result<bool> {
+        await!(self.level(codes::Level::Normal))?;
+
+        let mut send_packet = Vec::new();
+        if self.mode != codes::Mode::Command {
+            self.mode = codes::Mode::Command;
+            send_packet.push(codes::Command::CommandMode as u8);
         }
-    }
+        send_packet.push((codes::Command::Comm as u8) | (codes::FunctionSelect::Reset as u8));
 
-    async fn set_mode(&mut self, mode: DS2480BCommand) -> Result<()> {
-        let bytes = [mode as u8];
-        await!(self.port.write_all_async(&bytes))?;
-        Ok(())
-    }
-
-    async fn send_command(&mut self, command: DS2480BCommand) -> Result<u8> {
-        let bytes = [command as u8];
-        await!(self.port.write_all_async(&bytes))?;
+        await!(self.write(&send_packet))?;
 
         let mut buf = [0u8];
         await!(self.port.read_exact_async(&mut buf))?;
-        Ok(buf[0])
+
+        Ok((buf[0] & codes::reset_byte::RESET_MASK) == codes::reset_byte::PRESENCE || (buf[0] & codes::reset_byte::RESET_MASK) == codes::reset_byte::ALARMPRESENCE)
     }
 
-    pub async fn reset(&mut self) -> Result<()> {
-        loop {
-            match await!(self.send_command(DS2480BCommand::Reset)) {
-                Ok(0xCD) => {
-                    await!(sleep(Duration::from_millis(2))).unwrap();
-                    return Ok(());
-                },
-                Err(e) => return Err(e),
-                _ => {
-                    await!(self.send_break())?;
-                    await!(sleep(Duration::from_millis(2))).unwrap();
-                },
+    /// Attempt to resyc and detect a DS2480B and set the FLEX parameters
+    ///
+    /// Returns:  true  - DS2480B detected successfully
+    ///           false - Could not detect DS2480B
+    async fn detect(&mut self) -> Result<bool> {
+        self.mode = codes::Mode::Command;
+
+        // Send break. The tokio-serial API doesn't support sending native breaks, so we have to fake it
+        self.port.set_baud_rate(2400)?;
+        await!(self.write(&[0u8]))?;
+        self.port.set_baud_rate(9600)?;
+        await!(self.delay());
+
+        let send_packet = [codes::Command::Reset as u8];
+        await!(self.write(&send_packet))?;
+
+        await!(self.delay());
+
+        let send_packet = [
+            // default PDSRC = 1.37Vus
+            (codes::Command::Config as u8) | (codes::ParameterSelect::Slew as u8) | (codes::SlewRate::Slew1p37Vus as u8),
+            // default W1LT = 10us
+            (codes::Command::Config as u8) | (codes::ParameterSelect::Write1Low as u8) | (codes::Write1LowTime::Write10us as u8),
+            // default DSO/WORT = 8us
+            (codes::Command::Config as u8) | (codes::ParameterSelect::SampleOffset as u8) | (codes::SampleOffset::SampOff8us as u8),
+            // construct the command to read the baud rate (to test command block)
+            (codes::Command::Config as u8) | (codes::ParameterSelect::ParmRead as u8) | (codes::ParameterSelect::Baudrate as u8 >> 3),
+            // also do 1 bit operation (to test 1-Wire block)
+            (codes::Command::Comm as u8) | (codes::FunctionSelect::Bit as u8) | (codes::BitPolarity::One as u8),
+        ];
+
+        await!(self.write(&send_packet))?;
+
+        let mut buf = [0u8; 5];
+        await!(self.port.read_exact_async(&mut buf))?;
+        Ok((buf[3] & 0xF1) == 0x00 && (buf[3] & 0x0E) == 0x00 && (buf[4] & 0xF0) == 0x90 && (buf[4] & 0x0C) == 0x00)
+    }
+
+    /// Set the 1-Wire Net line level.
+    ///
+    /// Returns:  current 1-Wire Net level
+    pub async fn level(&mut self, new_level: codes::Level) -> Result<codes::Level> {
+        if new_level != self.level {
+            let mut reset = false;
+            let mut send_packet = Vec::new();
+            if self.mode == codes::Mode::Command {
+                self.mode = codes::Mode::Command;
+                send_packet.push(codes::Command::CommandMode as u8);
+            }
+            if new_level == codes::Level::Normal {
+                send_packet.push(codes::Command::PulseTerminate as u8);
+                send_packet.push((codes::Command::Comm as u8) | (codes::FunctionSelect::Chmod as u8) | (codes::SpeedSelect::Pulse as u8));
+                send_packet.push(codes::Command::PulseTerminate as u8);
+                await!(self.write(&send_packet))?;
+
+                let mut read_buffer = [0u8;2];
+                await!(self.port.read_exact_async(&mut read_buffer))?;
+                if (read_buffer[0] & 0xE0) == 0xE0 && (read_buffer[1] & 0xE0) == 0xE0 {
+                    reset = true;
+                    self.level = codes::Level::Normal;
+                }
+            } else {
+                send_packet.push((codes::Command::Config as u8) | (codes::ParameterSelect::Pulse5V as u8) | (codes::PulseTime::PulseInfinite as u8));
+                send_packet.push((codes::Command::Comm as u8) | (codes::FunctionSelect::Chmod as u8) | (codes::SpeedSelect::Pulse as u8));
+
+                await!(self.write(&send_packet))?;
+                let mut read_buffer = [0u8;1];
+                await!(self.port.read_exact_async(&mut read_buffer))?;
+                if (read_buffer[0] & 0x81) == 0 {
+                    self.level = new_level;
+                    reset = true;
+                }
+            }
+
+            if reset != true {
+                await!(self.detect())?;
             }
         }
+        Ok(self.level)
     }
 
-    pub async fn search(&mut self, mode: DS2480BSearchMode) -> Result<()> {
-        // let hdb = 0;
-        // let last_hdb = 0;
-        // let index = 0;
-
-        await!(self.reset())?;
-        await!(self.set_mode(DS2480BCommand::DataMode))?;
-        await!(self.send_command(match mode {
-            DS2480BSearchMode::ROM => DS2480BCommand::SearchROM,
-            DS2480BSearchMode::Alarm => DS2480BCommand::SearchROM,
-        }))?;
-        await!(self.set_mode(DS2480BCommand::CommandMode))?;
-        await!(self.set_mode(DS2480BCommand::SearchAccelleratorOn))?;
-        await!(self.set_mode(DS2480BCommand::DataMode))?;
-
-        // first search data
-        let bytes = [0u8; 16];
-        await!(self.port.write_all_async(&bytes))?;
-
-        // read found ROM code
-        let mut code = [0u8; 16];
-        await!(self.port.read_exact_async(&mut code))?;
-        await!(self.set_mode(DS2480BCommand::CommandMode))?;
-        await!(self.set_mode(DS2480BCommand::SearchAccelleratorOff))?;
-
-        await!(self.reset())?;
-
-
-        Ok(())
+    /// The 'search' function returns a general search object.
+    /// This function contains one parameter 'alarm_only'.
+    /// When 'alarm_only' is true the find alarm command
+    /// 0xEC is sent instead of the normal search command 0xF0.
+    /// Using the find alarm command 0xEC will limit the search to only
+    /// 1-Wire devices that are in an 'alarm' state.
+    pub fn search(&mut self, alarm_only: bool) -> search::Search<P> {
+        search::Search::new(self, alarm_only)
     }
-
 }

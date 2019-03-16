@@ -4,9 +4,10 @@ extern crate ds2480b;
 #[cfg(unix)]
 const DEFAULT_TTY: &str = "/dev/ttyUSB0";
 #[cfg(windows)]
-const DEFAULT_TTY: &str = "COM1";
+const DEFAULT_TTY: &str = "COM2";
 
-use ds2480b::{DS2480B, DS2480BSearchMode};
+use ds2480b::DS2480B;
+use hex::encode;
 
 fn main() {
     let mut args = std::env::args();
@@ -18,9 +19,27 @@ fn main() {
     port.set_exclusive(false)
         .expect("Unable to set serial port exlusive");
 
-    let mut ds2480b = DS2480B::new(port).expect("Failed opening serial port");
 
     tokio::run_async(async move {
-        await!(ds2480b.search(DS2480BSearchMode::ROM)).expect("Failed scanning for devices");
+        let mut ds2480b = DS2480B::new(port).expect("Failed opening serial port");
+        loop {
+            let mut search = ds2480b.search(false);
+            eprintln!("Searching...");
+            loop {
+                match await!(search.next()) {
+                    Ok(Some((device, new_search))) => {
+                        eprintln!("Found Device {}", encode(device));
+                        search = new_search;
+                    },
+                    Ok(None) => {
+                        eprintln!("Search done.");
+                        break;
+                    },
+                    Err(err) => {
+                        panic!("{}", err);
+                    }
+                }
+            }
+        }
     });
 }
