@@ -29,12 +29,6 @@ impl<'a, P: SerialPort + AsyncReadExt + AsyncWriteExt> Search<'a, P> {
         }
     }
 
-    pub fn reset(&mut self) {
-        self.last_discrepancy = 0;
-        self.last_family_discrepancy = 0;
-        self.last_device = false;
-    }
-
     pub async fn next(mut self) -> Result<Option<([u8;8], Search<'a, P>)>> {
         if self.last_device {
             return Ok(None);
@@ -58,7 +52,6 @@ impl<'a, P: SerialPort + AsyncReadExt + AsyncWriteExt> Search<'a, P> {
         send_packet.push(codes::Command::CommandMode as u8);
         send_packet.push((codes::Command::Comm as u8) | (codes::FunctionSelect::SearchOn as u8));
 
-        self.device.mode = codes::Mode::Data;
         send_packet.push(codes::Command::DataMode as u8);
 
         let rom = Bw64::empty();
@@ -84,10 +77,11 @@ impl<'a, P: SerialPort + AsyncReadExt + AsyncWriteExt> Search<'a, P> {
         send_packet.push(codes::Command::CommandMode as u8);
         send_packet.push((codes::Command::Comm as u8) | (codes::FunctionSelect::SearchOff as u8));
 
+        self.device.mode = codes::Mode::Command;
         await!(self.device.write(&send_packet))?;
 
         let mut buf = [0u8;17];
-        await!(self.device.port.read_exact_async(&mut buf))?;
+        await!(self.device.read(&mut buf))?;
 
         // no idea why swapping is necessary here
         for i in 0..8 {
