@@ -55,22 +55,26 @@ fn main() {
     loop {
         let tty_path = tty_path.clone();
         tokio::run_async(async move {
-            await!(tokio_timer::sleep(Duration::from_millis(100))).unwrap();
             let settings = tokio_serial::SerialPortSettings::default();
-            let port = tokio_serial::Serial::from_path(&tty_path, &settings).unwrap();
-            #[cfg(unix)]
-            port.set_exclusive(false)
-                .expect("Unable to set serial port exlusive");
+            match tokio_serial::Serial::from_path(&tty_path, &settings) {
+                Ok(port) => {
+                    #[cfg(unix)]
+                    port.set_exclusive(false)
+                        .expect("Unable to set serial port exlusive");
 
-            let mut ds2480b = DS2480B::new(port).expect("Failed opening serial port");
-            loop {
-                if let Err(_) = await!(scan(&mut ds2480b)) {
-                    if let Err(err) = await!(ds2480b.detect()) {
-                        eprintln!("{:?}, reconnect", err);
-                        break;
+                    let mut ds2480b = DS2480B::new(port).expect("Failed opening serial port");
+                    loop {
+                        if let Err(_) = await!(scan(&mut ds2480b)) {
+                            if let Err(err) = await!(ds2480b.detect()) {
+                                eprintln!("{:?}, reconnect", err);
+                                break;
+                            }
+                        }
+                        await!(tokio_timer::sleep(Duration::from_millis(100))).unwrap();
                     }
-                }
-                await!(tokio_timer::sleep(Duration::from_millis(100))).unwrap();
+                    await!(tokio_timer::sleep(Duration::from_millis(100))).unwrap();
+                },
+                Err(err) => eprintln!("{:?}", err),
             }
         });
     }
