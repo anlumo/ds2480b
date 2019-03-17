@@ -29,7 +29,7 @@ impl<'a, P: SerialPort + AsyncReadExt + AsyncWriteExt> Search<'a, P> {
         }
     }
 
-    pub async fn next(mut self) -> Result<Option<([u8;8], Search<'a, P>)>> {
+    pub async fn next(mut self) -> Result<Option<([u8;7], Search<'a, P>)>> {
         if self.last_device {
             return Ok(None);
         }
@@ -117,8 +117,9 @@ impl<'a, P: SerialPort + AsyncReadExt + AsyncWriteExt> Search<'a, P> {
         if self.last_discrepancy == 0 {
             self.last_device = true;
         }
-        let mut rom = [0u8;8];
-        rom.copy_from_slice(&tmp_rom_bytes);
+        let mut rom = [0u8;7];
+        rom.copy_from_slice(&tmp_rom_bytes[..7]);
+        rom[1..].reverse();
         Ok(Some((rom, self)))
     }
 }
