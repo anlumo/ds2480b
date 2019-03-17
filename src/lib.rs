@@ -34,8 +34,8 @@ impl<P: SerialPort + AsyncReadExt + AsyncWriteExt> DS2480B<P> {
             timeout: Duration::from_millis(0), // this is ignored by tokio_serial!
         })?;
         let mut stream = TimeoutStream::new(port);
-        stream.set_read_timeout(Some(Duration::from_secs(1)));
-        stream.set_write_timeout(Some(Duration::from_secs(1)));
+        stream.set_read_timeout(Some(Duration::from_millis(200)));
+        stream.set_write_timeout(Some(Duration::from_millis(200)));
         Ok(DS2480B {
             stream,
             level: codes::Level::Normal,

@@ -52,9 +52,11 @@ fn main() {
     let mut args = std::env::args();
     let tty_path = args.nth(1).unwrap_or_else(|| DEFAULT_TTY.into());
 
-    tokio::run_async(async move {
-        let settings = tokio_serial::SerialPortSettings::default();
-        loop {
+    loop {
+        let tty_path = tty_path.clone();
+        tokio::run_async(async move {
+            await!(tokio_timer::sleep(Duration::from_millis(100))).unwrap();
+            let settings = tokio_serial::SerialPortSettings::default();
             let port = tokio_serial::Serial::from_path(&tty_path, &settings).unwrap();
             #[cfg(unix)]
             port.set_exclusive(false)
@@ -64,13 +66,12 @@ fn main() {
             loop {
                 if let Err(_) = await!(scan(&mut ds2480b)) {
                     if let Err(err) = await!(ds2480b.detect()) {
-                        eprintln!("Error {:?}, reconnect", err);
-                        drop(ds2480b);
+                        eprintln!("{:?}, reconnect", err);
                         break;
                     }
                 }
                 await!(tokio_timer::sleep(Duration::from_millis(100))).unwrap();
             }
-        }
-    });
+        });
+    }
 }
